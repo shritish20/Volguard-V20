@@ -1,0 +1,73 @@
+name: Deploy to AWS EC2
+
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:          # Also allow manual trigger from GitHub UI
+
+jobs:
+  deploy:
+    name: Deploy VolGuard
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Deploy to EC2 via SSH
+        uses: appleboy/ssh-action@v1.1.0
+        with:
+          host: ${{ secrets.EC2_HOST }}
+          username: ${{ secrets.EC2_USER }}
+          key: ${{ secrets.EC2_SSH_KEY }}
+          port: 22
+          script: |
+            set -e
+
+            echo "=== VolGuard Deploy: $(date) ==="
+
+            # Go to project directory
+            cd /opt/volguard
+
+            # Pull latest code
+            git pull origin main
+
+            # Ensure .env exists (secrets managed on server, not in git)
+            if [ ! -f .env ]; then
+              echo "ERROR: .env file missing on server. Copy .env.example and fill values."
+              exit 1
+            fi
+
+            # Build and restart containers
+            # --build        : rebuild images with new code
+            # --no-deps      : don't restart deps unnecessarily
+            # -d             : detached mode
+            docker compose build --no-cache
+            docker compose up -d
+
+            # Wait for backend health
+            echo "Waiting for backend health check..."
+            for i in $(seq 1 12); do
+              if docker exec volguard_backend curl -sf http://localhost:8000/api/health > /dev/null 2>&1; then
+                echo "✅ Backend healthy after ${i}x checks"
+                break
+              fi
+              echo "  Check $i/12 — waiting 10s..."
+              sleep 10
+              if [ $i -eq 12 ]; then
+                echo "❌ Backend failed health check after 2 minutes"
+                docker compose logs --tail=50 volguard
+                exit 1
+              fi
+            done
+
+            # Clean up old images to save disk space
+            docker image prune -f
+
+            echo "=== Deploy complete ==="
+
+      - name: Notify on failure
+        if: failure()
+        run: |
+          echo "Deploy failed — check GitHub Actions logs"
+          # Optional: add curl to your Telegram bot here for failure alerts

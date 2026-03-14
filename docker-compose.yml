@@ -1,0 +1,70 @@
+services:
+
+  # ── Backend: FastAPI quant engine ──────────────────────────────────────────
+  volguard:
+    build:
+      context: ./backend
+      dockerfile: Dockerfile
+    container_name: volguard_backend
+    restart: unless-stopped
+    expose:
+      - "8000"          # Internal only — nginx proxies, port NOT exposed to internet
+    volumes:
+      - volguard_data:/app/data       # SQLite DB + morning brief cache — survives restarts
+      - volguard_logs:/app/logs       # Persistent logs
+    env_file:
+      - .env
+    environment:
+      - DATABASE_URL=sqlite:////app/data/volguard.db
+      - LOG_FILE=/app/logs/volguard.log
+      - TZ=Asia/Kolkata
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8000/api/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 30s
+    logging:
+      driver: "json-file"
+      options:
+        max-size: "50m"
+        max-file: "7"
+
+  # ── Frontend: React + nginx reverse proxy ─────────────────────────────────
+  frontend:
+    build:
+      context: ./frontend
+      dockerfile: Dockerfile
+    container_name: volguard_frontend
+    restart: unless-stopped
+    ports:
+      - "80:80"         # Public HTTP — point your domain / ALB here
+    depends_on:
+      volguard:
+        condition: service_healthy
+    volumes:
+      - ./nginx.conf:/etc/nginx/conf.d/default.conf:ro
+    healthcheck:
+      test: ["CMD", "wget", "-qO-", "http://localhost:80/"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 15s
+    logging:
+      driver: "json-file"
+      options:
+        max-size: "10m"
+        max-file: "3"
+
+# ── Named volumes (persist across container restarts and redeployments) ───────
+# WARNING: `docker-compose down -v` DELETES these volumes and all trade data.
+# Always use `docker-compose down` (without -v) to stop safely.
+volumes:
+  volguard_data:
+    driver: local
+    labels:
+      com.volguard.description: "SQLite database and daily cache — DO NOT DELETE"
+  volguard_logs:
+    driver: local
+    labels:
+      com.volguard.description: "Application logs"
